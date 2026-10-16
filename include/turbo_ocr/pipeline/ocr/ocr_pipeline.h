@@ -160,7 +160,11 @@ public:
   // Unresolved word geometry covers the whole detected line. All readers of
   // the borrowed BGR8 image finish before return, including exceptional exits.
   // The caller validates the device allocation and selects its CUDA device.
-  [[nodiscard]] OcrPipelineResult run_device(GpuImage gpu_img, cudaStream_t stream);
+  // Supplying unreadable opts into mandatory opaque coverage of valid crops
+  // whose recognition is empty/below threshold. Default callers remain strict.
+  // Invalid metadata and inference failures always throw.
+  [[nodiscard]] OcrPipelineResult run_device(GpuImage gpu_img, cudaStream_t stream,
+                                            std::vector<Box> *unreadable = nullptr);
 
   // Text + layout in one struct. Returns an empty `layout` vector when the
   // pipeline was never loaded with a layout model, so this overload is

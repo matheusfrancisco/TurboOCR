@@ -60,6 +60,17 @@ int tocr_device_recognize(tocr_device_engine *engine, const void *bgr,
                            void *cuda_stream, tocr_device_emit_fn emit,
                            void *user, char *error, size_t error_capacity);
 
+/* Redaction-specific recognition. Every unreadable detected crop is delivered
+ * to cover with a bounded whole-line rectangle and MUST be painted opaquely
+ * before presentation. Both callbacks are mandatory. Discard ALL results on
+ * failure. Ordinary recognize retains its strict behavior. */
+typedef int (*tocr_device_cover_fn)(void *user, int x, int y, int width,
+                                    int height, int line);
+int tocr_device_recognize_redaction(tocr_device_engine *engine, const void *bgr,
+    int width, int height, size_t pitch, void *cuda_stream,
+    tocr_device_emit_fn emit, tocr_device_cover_fn cover, void *user,
+    char *error, size_t error_capacity);
+
 #ifdef __cplusplus
 }
 #endif

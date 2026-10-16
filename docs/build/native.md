@@ -302,3 +302,13 @@ Notes for this platform:
   configure with `-DTURBO_BUILD_FASTPDF2PNG=OFF` afterwards.
 - The Docker images already do all of this per `TARGETARCH`; the published
   `turboocr-cpu` image is multi-arch (amd64 + arm64).
+
+The separate `tocr_device_recognize_redaction` entry point supplies mandatory
+opaque-coverage callbacks for detected crops whose recognition is empty or
+below `kDropScore`. A redaction caller must cover each returned whole-line
+rectangle before presentation; it must never treat these as absent text. Both
+the text and coverage callbacks are mandatory, and any failure invalidates all
+callbacks from the call. CUDA/inference faults, dropped crops, nonfinite scores
+and invalid metadata remain errors. The original `tocr_device_recognize`
+entry point retains its strict rejection behavior. Neither path downloads
+source pixels or invokes CPU word placement.

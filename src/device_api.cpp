@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 
 #include "turbo_ocr/pipeline/ocr/ocr_pipeline.h"
+#include "turbo_ocr/common/errors.h"
 
 struct tocr_device_engine {
   int device;
@@ -147,10 +148,11 @@ extern "C" void tocr_device_destroy(tocr_device_engine *engine) {
   }
 }
 
-extern "C" int tocr_device_recognize(tocr_device_engine *engine, const void *bgr,
+static int recognize_impl(tocr_device_engine *engine, const void *bgr,
                                      int width, int height, size_t pitch,
                                      void *cuda_stream, tocr_device_emit_fn emit,
-                                     void *user, char *error, size_t error_capacity) {
+                                     void *user, char *error, size_t error_capacity,
+                                     tocr_device_cover_fn cover) {
   clear_error(error, error_capacity);
   try {
     if (!engine || !emit)
@@ -168,9 +170,12 @@ extern "C" int tocr_device_recognize(tocr_device_engine *engine, const void *bgr
       return fail(error, error_capacity, "Invalid device OCR CUDA stream");
     if (!valid_image(bgr, engine->device, width, height, pitch))
       return fail(error, error_capacity, "Invalid device OCR BGR allocation, dimensions, or pitch");
+    std::vector<turbo_ocr::Box> unreadable;
     auto result = engine->pipeline.run_device(
-        {const_cast<void *>(bgr), pitch, height, width}, stream);
-    if (result.text_degraded || result.results.size() > INT_MAX)
+        {const_cast<void *>(bgr), pitch, height, width}, stream,
+        cover ? &unreadable : nullptr);
+    if (result.text_degraded || result.results.size() > INT_MAX ||
+        unreadable.size() > INT_MAX - result.results.size())
       return fail(error, error_capacity, "Device OCR recognition degraded");
     for (size_t line = 0; line < result.results.size(); ++line) {
       const auto &item = result.results[line];
@@ -197,8 +202,47 @@ extern "C" int tocr_device_recognize(tocr_device_engine *engine, const void *bgr
         }
       }
     }
+    for (size_t i = 0; i < unreadable.size(); ++i) {
+      Rect rect{};
+      if (!bounded_rect(unreadable[i], width, height, rect))
+        return fail(error, error_capacity, "Device OCR unreadable geometry invalid");
+      if (cover(user, rect.x, rect.y, rect.width, rect.height,
+                static_cast<int>(result.results.size() + i)) != 0)
+        return fail(error, error_capacity, "Device OCR coverage callback aborted");
+    }
     return 0;
+  } catch (const turbo_ocr::InferenceError &e) {
+    // Only these fixed diagnostics may cross the ABI. Never forward arbitrary
+    // exception messages: they may contain model paths or recognized text.
+    for (const char *reason : {"Device OCR result count mismatch",
+                               "Device OCR crop dropped",
+                               "Device OCR crop recognized empty",
+                               "Device OCR crop below threshold",
+                               "Device OCR crop confidence invalid",
+                               "Device OCR word metadata invalid",
+                               "Device OCR result assembly degraded"}) {
+      if (std::strcmp(e.what(), reason) == 0)
+        return fail(error, error_capacity, reason);
+    }
+    return fail(error, error_capacity, "Device OCR inference failed");
+  } catch (const turbo_ocr::CudaError &) {
+    return fail(error, error_capacity, "Device OCR CUDA operation failed");
   } catch (...) {
     return fail(error, error_capacity, "Device OCR recognition failed");
   }
+}
+
+extern "C" int tocr_device_recognize(tocr_device_engine *engine, const void *bgr,
+    int width, int height, size_t pitch, void *stream, tocr_device_emit_fn emit,
+    void *user, char *error, size_t capacity) {
+  return recognize_impl(engine, bgr, width, height, pitch, stream, emit, user,
+                        error, capacity, nullptr);
+}
+extern "C" int tocr_device_recognize_redaction(tocr_device_engine *engine,
+    const void *bgr, int width, int height, size_t pitch, void *stream,
+    tocr_device_emit_fn emit, tocr_device_cover_fn cover, void *user,
+    char *error, size_t capacity) {
+  if (!cover) return fail(error, capacity, "Missing device OCR coverage callback");
+  return recognize_impl(engine, bgr, width, height, pitch, stream, emit, user,
+                        error, capacity, cover);
 }
