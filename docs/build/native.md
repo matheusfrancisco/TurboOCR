@@ -136,6 +136,75 @@ curl -X POST http://localhost:8080/ocr/raw \
     during the build — the `curl -fsS` above fails fast on that 503, so retry
     it (or poll in a loop) until it returns 200.
 
+
+## Embedded device-image API
+
+GPU builds also provide `libturboocr-device.so` and the CUDA-header-free C
+interface [`include/turbo_ocr/device_api.h`](../../include/turbo_ocr/device_api.h).
+This is an **in-process** library: it starts no HTTP/gRPC listener, sends no
+IPC requests, and accepts a borrowed device pointer rather than an image
+upload. CPU-only builds do not compile or link this target.
+
+```bash
+cmake -B build -DFETCH_MODELS=OFF -DTURBO_BUILD_FASTPDF2PNG=OFF \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120
+cmake --build build --target turboocr-device -j$(nproc)
+```
+
+Use the architecture of the deployment GPU. The normal GPU configure-time
+dependencies above still apply (including OpenCV, TensorRT, CUDA-enabled ORT,
+PDFium, Drogon, and protobuf/gRPC); this target reuses the GPU pipeline rather
+than introducing a second inference implementation. At runtime its shared
+dependencies and NVIDIA driver must be available. Installation places the
+library in `lib/` and the C header in `include/turbo_ocr/`.
+
+`tocr_device_create` requires a CUDA device ordinal, existing **serialized
+TensorRT** detection/recognition engines, and the matching recognition
+dictionary. An optional classifier engine enables angle classification.
+Prepare compatible engine files before startup: this API never downloads,
+installs, or converts models. Missing/unreadable files, incompatible engines,
+dictionary mismatches, and unavailable devices fail creation with an error.
+Keep the engine alive across frames so model and workspace allocations persist.
+
+`tocr_device_recognize` accepts interleaved BGR8 in an ordinary CUDA device
+allocation, including a pitched allocation or an ROI pointer into one. Width
+and height must each be at least 8; pitch must cover `width * 3`, and the
+addressed byte span must fit `INT_MAX` (the existing inference kernels use
+signed-int offsets). Host/managed memory, wrong-device allocations, out-of-range
+ROIs, and captured/wrong-context streams are rejected.
+
+- The caller owns the buffer and CUDA stream until the synchronous call
+  returns. Work already queued on that stream precedes inference. Order writes
+  from other streams explicitly before calling; do not modify/free the input
+  concurrently. All source-image readers finish before return, including
+  inference failures and callback aborts.
+- Source image pixels never download to host. GPU word placement is explicitly
+  selected, independently of `TURBO_WORDS_GPU`; only model outputs and placement
+  metadata transfer back. Unsupported placement, missing attributable ink, or
+  anchors in recognizer padding conservatively give each affected word its
+  **whole detected line box**, not a CPU pixel fallback or a proportional box.
+- Callbacks carry UTF-8 text, confidence, bounded positive integer rectangles,
+  and zero-based line/word indices. Text is borrowed only during the callback.
+  A line without word segmentation is emitted as word 0 with its line box.
+  Rectangles use exclusive right/bottom edges and include conservative rounding
+  padding before clipping to the image.
+- Callback nonzero, missing/low-confidence recognition of any detected crop,
+  dropped crops, invalid output metadata, and inference faults return failure.
+  **Discard every callback from a failed call**, even if earlier callbacks
+  succeeded. A genuinely detection-free image may succeed without callbacks.
+  Errors contain no recognized text; no C++ exceptions cross the C ABI.
+- Serialize calls sharing one engine: concurrent or callback-reentrant
+  recognition is rejected. Every call selects the engine's device, so an
+  embedding runtime may move between OS threads. Stop all calls before destroy;
+  do not destroy from a callback.
+
+GPU contract coverage is part of `turbo_ocr_tests '[words_gpu][device]'`,
+covering unsupported neighbouring geometry, no-ink words, and padding anchors.
+For a deployment smoke run, create an engine from the provisioned models, queue
+a known BGR frame on a non-default CUDA stream, recognize that borrowed pointer,
+and check text/geometry plus a callback-abort error. Use CUDA transfer tracing
+when validating the zero-source-pixel-download requirement on the target GPU.
+
 ## Build output
 
 | Path | What |

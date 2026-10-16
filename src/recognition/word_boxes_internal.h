@@ -94,7 +94,8 @@ using BandBoxedFn = std::function<void(Components &)>;
 std::vector<OCRWord> words_from_components(const LinePlan &plan, Components &comps,
                                            const std::vector<CtcWord> &words,
                                            const ColProfileFn &col_profile,
-                                           const BandBoxedFn &band_boxed);
+                                           const BandBoxedFn &band_boxed,
+                                           const Box *unresolved_line = nullptr);
 
 // A glyph of two lines that touch: the CPU path cuts it at the valley of its
 // row profile (bleed split), so a GPU pass that finds one hands the line over.

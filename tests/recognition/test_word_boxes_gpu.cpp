@@ -343,6 +343,45 @@ TEST_CASE("GPU word boxes: grown buffers, lines handed back, nothing to place", 
   }
 }
 
+TEST_CASE("device-only words preserve whole-line coverage when geometry is unresolved",
+          "[words_gpu][device]") {
+  if (!have_gpu()) SKIP("no CUDA device");
+  using namespace turbo_ocr::recognition;
+  Page p;
+  std::size_t line = 0;
+  SECTION("unrasterizable neighbouring text cannot force a host-pixel fallback") {
+    p = printed_page();
+    const int y = 320 + 10 * 30;
+    p.boxes.push_back({{{{{300, y - 25}}, {{550, y + 15}}, {{800, y - 25}},
+                         {{550, y - 15}}}}});
+    p.words.emplace_back();
+    line = 11;
+    REQUIRE_FALSE(detail::plan_line(p.boxes[line], p.img.size(), p.boxes).runs_ok);
+  }
+  SECTION("words with no attributable ink cannot receive guessed sub-line boxes") {
+    p.img = cv::Mat(200, 600, CV_8UC3, cv::Scalar(255, 255, 255));
+    p.boxes.push_back({{{{{20, 30}}, {{500, 30}}, {{500, 80}}, {{20, 80}}}}});
+    p.words.push_back({{"first", 0.9f, 0.1f, 0.3f}, {"last", 0.9f, 0.7f, 0.9f}});
+  }
+  SECTION("CTC anchors in recognizer padding cannot locate a word inside the line") {
+    p.img = cv::Mat(200, 600, CV_8UC3, cv::Scalar(255, 255, 255));
+    add_line(p, "padded", 40, 90, 1.0, 2);
+    p.words[0][0].first = 1.1f;
+    p.words[0][0].last = 1.2f;
+  }
+  DevicePage dev(p.img);
+  GpuWordPlacer placer;
+  std::vector<turbo_ocr::OCRResultItem> results(1);
+  placer.place(dev.img, nullptr, p.boxes, p.words, {{0, line}}, nullptr,
+                GpuWordPlacer::Fallback::WholeLine)(results);
+  REQUIRE(results[0].words.size() == p.words[line].size());
+  for (std::size_t i = 0; i < p.words[line].size(); ++i) {
+    CHECK(results[0].words[i].text == p.words[line][i].text);
+    CHECK(results[0].words[i].confidence == p.words[line][i].score);
+    CHECK(results[0].words[i].box == p.boxes[line]);
+  }
+}
+
 // Real pages (TURBO_WORDS_GPU_PAGES = files of "image path, lines, words" as
 // written by the evaluation tooling): the GPU words must be the CPU words.
 TEST_CASE("GPU word boxes on real pages", "[words_gpu_pages]") {

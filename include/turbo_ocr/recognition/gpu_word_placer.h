@@ -33,6 +33,10 @@ public:
 
   using Finish = std::function<void(std::vector<OCRResultItem> &)>;
 
+  // Embedded device callers forbid source-pixel downloads. Unresolved words
+  // then keep the entire detected line, never a guessed sub-line span.
+  enum class Fallback { CpuPixels, WholeLine };
+
   // Word boxes of the lines `todo` -- (result index, box index) pairs -- on
   // the device page `page`: the pixel work runs on `stream` and is waited for
   // here. Returns the rest, which writes each line's words into its result:
@@ -44,7 +48,8 @@ public:
                              const std::vector<Box> &boxes,
                              const std::vector<std::vector<CtcWord>> &words,
                              std::vector<std::pair<std::size_t, std::size_t>> todo,
-                             const cv::Mat *host_page);
+                             const cv::Mat *host_page,
+                             Fallback fallback = Fallback::CpuPixels);
 
   // place() off the caller's GPU worker: copies the device page (the only
   // work done here, waited for on `stream`) and returns a Finish that runs the

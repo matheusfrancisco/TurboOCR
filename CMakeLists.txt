@@ -792,6 +792,21 @@ else()
     target_compile_options(turbo_ocr_gpu PRIVATE ${TURBO_OCR_CXX_FLAGS})
     add_library(turbo_ocr::gpu ALIAS turbo_ocr_gpu)
 
+    # In-process borrowed-device-image C ABI. Static dependencies must be PIC
+    # when linked into the shared library; CPU-only targets remain unchanged.
+    set_target_properties(turbo_ocr_common turbo_ocr_gpu PROPERTIES
+        POSITION_INDEPENDENT_CODE ON)
+    add_library(turboocr-device SHARED src/device_api.cpp)
+    target_link_libraries(turboocr-device PRIVATE turbo_ocr_gpu CUDA::cuda_driver)
+    target_include_directories(turboocr-device PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>)
+    target_compile_options(turboocr-device PRIVATE ${TURBO_OCR_CXX_FLAGS})
+    set_target_properties(turboocr-device PROPERTIES
+        BUILD_RPATH "${TENSORRT_LIB_DIR}"
+        INSTALL_RPATH "${TENSORRT_LIB_DIR};${ONNXRUNTIME_LIB_DIR}")
+    target_link_options(turboocr-device PRIVATE "-Wl,--disable-new-dtags")
+
     # GPU tests link to GPU library so CUDA-dependent tests can be added here.
     target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_gpu CUDA::cudart)
     target_include_directories(turbo_ocr_tests PRIVATE
@@ -956,6 +971,8 @@ if(USE_CPU_ONLY)
     install(TARGETS turboocr-cpu-server RUNTIME DESTINATION bin)
 else()
     install(TARGETS turboocr-server RUNTIME DESTINATION bin)
+    install(TARGETS turboocr-device LIBRARY DESTINATION lib)
+    install(FILES include/turbo_ocr/device_api.h DESTINATION include/turbo_ocr)
 endif()
 install(DIRECTORY models/ DESTINATION share/turbo-ocr/models OPTIONAL)
 install(DIRECTORY scripts/ DESTINATION share/turbo-ocr/scripts USE_SOURCE_PERMISSIONS)

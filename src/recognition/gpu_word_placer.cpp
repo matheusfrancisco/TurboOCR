@@ -64,7 +64,8 @@ struct Planned {
 
 Planned plan_jobs(cv::Size page, const std::vector<Box> &boxes,
                   const std::vector<std::vector<CtcWord>> &words,
-                  const std::vector<std::pair<std::size_t, std::size_t>> &todo) {
+                  const std::vector<std::pair<std::size_t, std::size_t>> &todo,
+                  bool whole_line_fallback = false) {
   Planned out;
   out.jobs->reserve(todo.size());
   for (const auto &[ri, bi] : todo) {
@@ -73,7 +74,11 @@ Planned plan_jobs(cv::Size page, const std::vector<Box> &boxes,
     j.result = ri;
     j.box = bi;
     j.plan = detail::plan_line(boxes[bi], page, boxes);
-    j.cpu = !j.plan.runs_ok;
+    j.cpu = !j.plan.runs_ok ||
+            (whole_line_fallback &&
+             std::any_of(words[bi].begin(), words[bi].end(), [](const CtcWord &word) {
+               return word.first < 0.0f || word.last > 1.0f;
+             }));
     if (!j.cpu) out.gpu.push_back(out.jobs->size());
     out.jobs->push_back(std::move(j));
   }
@@ -273,7 +278,8 @@ struct GpuWordPlacer::Impl {
   // place() with the lines planned; `cpu_lines` gets the lines handed back.
   Finish place(const GpuImage &page, cudaStream_t stream, Planned planned,
                const std::vector<Box> &boxes, const std::vector<std::vector<CtcWord>> &words,
-               const cv::Mat *host_page, std::size_t &cpu_lines);
+               const cv::Mat *host_page, std::size_t &cpu_lines,
+               Fallback fallback = Fallback::CpuPixels);
 
   // One GPU pass over `jobs[first, last)`, appended to `out`.
   void run(const gpu::PageView &page, cudaStream_t stream, std::vector<LineJob> &jobs,
@@ -550,15 +556,19 @@ GpuWordPlacer::Finish GpuWordPlacer::place_later(
 GpuWordPlacer::Finish GpuWordPlacer::place(
     const GpuImage &page, cudaStream_t stream, const std::vector<Box> &boxes,
     const std::vector<std::vector<CtcWord>> &words,
-    std::vector<std::pair<std::size_t, std::size_t>> todo, const cv::Mat *host_page) {
-  return impl_->place(page, stream, plan_jobs({page.cols, page.rows}, boxes, words, todo), boxes,
-                      words, host_page, cpu_lines_);
+    std::vector<std::pair<std::size_t, std::size_t>> todo, const cv::Mat *host_page,
+    Fallback fallback) {
+  return impl_->place(page, stream,
+                      plan_jobs({page.cols, page.rows}, boxes, words, todo,
+                                fallback == Fallback::WholeLine),
+                      boxes, words, host_page, cpu_lines_, fallback);
 }
 
 GpuWordPlacer::Finish GpuWordPlacer::Impl::place(const GpuImage &page, cudaStream_t stream,
                                                  Planned planned, const std::vector<Box> &boxes,
                                                  const std::vector<std::vector<CtcWord>> &words,
-                                                 const cv::Mat *host_page, std::size_t &cpu_lines) {
+                                                 const cv::Mat *host_page, std::size_t &cpu_lines,
+                                                 Fallback fallback) {
   const auto jobs = std::move(planned.jobs);
   const std::vector<std::size_t> &gpu_jobs = planned.gpu;
 
@@ -598,7 +608,7 @@ GpuWordPlacer::Finish GpuWordPlacer::Impl::place(const GpuImage &page, cudaStrea
     cpu_lines += j.cpu ? 1 : 0;
   }
   cv::Mat host;
-  if (any_cpu) {
+  if (any_cpu && fallback == Fallback::CpuPixels) {
     if (host_page != nullptr) {
       host = *host_page;
     } else {
@@ -610,10 +620,16 @@ GpuWordPlacer::Finish GpuWordPlacer::Impl::place(const GpuImage &page, cudaStrea
     }
   }
 
-  return [jobs, chunks, host, boxes, words](std::vector<OCRResultItem> &results) {
+  return [jobs, chunks, host, boxes, words, fallback](std::vector<OCRResultItem> &results) {
     for (auto &j : *jobs) {
       auto &dst = results[j.result].words;
       if (j.cpu) {
+        if (fallback == Fallback::WholeLine) {
+          dst.reserve(words[j.box].size());
+          for (const auto &word : words[j.box])
+            dst.push_back({word.text, word.score, boxes[j.box]});
+          continue;
+        }
         dst = locate_words(host, boxes[j.box], words[j.box], boxes);
         continue;
       }
@@ -637,7 +653,8 @@ GpuWordPlacer::Finish GpuWordPlacer::Impl::place(const GpuImage &page, cudaStrea
         return col;
       };
       dst = detail::words_from_components(plan, comps, words[j.box], col_profile,
-                                          [](detail::Components &) {});
+                                          [](detail::Components &) {},
+                                          fallback == Fallback::WholeLine ? &boxes[j.box] : nullptr);
     }
   };
 }

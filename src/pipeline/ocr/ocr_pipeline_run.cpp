@@ -29,6 +29,7 @@
 #include "turbo_ocr/engine/trt/onnx_to_trt.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <format>
@@ -454,5 +455,57 @@ OcrPipelineResult OcrPipeline::run_with_layout(GpuImage gpu_img,
 
   timer.print_total();
 
+  return out;
+}
+
+OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream) {
+  UseGuard guard{in_use_, "run_device"};
+  // Unlike the serving pipeline, keep every image reader on the caller's
+  // stream. Its preceding writes are ordered before detection automatically.
+  // On failure there may be kernels queued without a completion event yet.
+  struct Drain {
+    cudaStream_t stream;
+    bool finished = false;
+    ~Drain() {
+      if (!finished) (void)cudaStreamSynchronize(stream);
+    }
+    void finish() {
+      const auto status = cudaStreamSynchronize(stream);
+      finished = true;
+      CUDA_CHECK(status);
+    }
+  } drain{stream};
+  wait_prior_readers_();
+  auto boxes = det_->run(gpu_img, gpu_img.rows, gpu_img.cols, stream);
+  sorted_boxes(boxes);
+  classify_angles_(gpu_img, boxes, stream, nullptr);
+  std::vector<std::vector<recognition::CtcWord>> words;
+  auto recognized = rec_->run(gpu_img, boxes, stream, &words);
+  if (recognized.size() != boxes.size() || words.size() != boxes.size() ||
+      (!boxes.empty() && rec_->last_dropped_crops() != 0))
+    throw turbo_ocr::InferenceError("Device OCR recognition degraded");
+  // A partially unreadable page is not a clean result for a redaction caller.
+  for (std::size_t i = 0; i < recognized.size(); ++i) {
+    const auto &[text, confidence] = recognized[i];
+    if (text.empty() || !std::isfinite(confidence) ||
+        confidence < turbo_ocr::kDropScore || confidence > 1.0f)
+      throw turbo_ocr::InferenceError("Device OCR recognition degraded");
+    for (const auto &word : words[i])
+      if (word.text.empty() || !std::isfinite(word.score) || word.score < 0.0f ||
+          word.score > 1.0f || !std::isfinite(word.first) ||
+          !std::isfinite(word.last) || word.last < word.first)
+        throw turbo_ocr::InferenceError("Device OCR word metadata invalid");
+  }
+  OcrPipelineResult out;
+  const detail::WordPlaceFn placer =
+      [&](auto todo) -> turbo_ocr::recognition::GpuWordPlacer::Finish {
+    return word_placer().place(gpu_img, stream, boxes, words, std::move(todo),
+                               nullptr, recognition::GpuWordPlacer::Fallback::WholeLine);
+  };
+  detail::combine_recognition(out, boxes, recognized, &words, nullptr, false, &placer);
+  if (out.text_degraded || out.results.size() != boxes.size())
+    throw turbo_ocr::InferenceError("Device OCR recognition degraded");
+  CUDA_CHECK(cudaEventRecord(rec_event_, stream));
+  drain.finish();
   return out;
 }

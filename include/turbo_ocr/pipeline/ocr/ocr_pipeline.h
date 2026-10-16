@@ -155,6 +155,13 @@ public:
   // The caller retains ownership of the GPU buffer.
   [[nodiscard]] std::vector<OCRResultItem> run(const GpuImage &gpu_img, cudaStream_t stream = 0);
 
+  // Strict embedded text OCR: never downloads source pixels, never routes to
+  // external backends, and throws on dropped/empty/low-confidence text crops.
+  // Unresolved word geometry covers the whole detected line. All readers of
+  // the borrowed BGR8 image finish before return, including exceptional exits.
+  // The caller validates the device allocation and selects its CUDA device.
+  [[nodiscard]] OcrPipelineResult run_device(GpuImage gpu_img, cudaStream_t stream);
+
   // Text + layout in one struct. Returns an empty `layout` vector when the
   // pipeline was never loaded with a layout model, so this overload is
   // always safe to call. Preferred over `run()` for HTTP/gRPC paths that

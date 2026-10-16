@@ -421,7 +421,8 @@ LinePlan plan_line(const Box &line, cv::Size page, const std::vector<Box> &page_
 std::vector<OCRWord> words_from_components(const LinePlan &plan, Components &comps,
                                            const std::vector<CtcWord> &words,
                                            const ColProfileFn &col_profile,
-                                           const BandBoxedFn &band_boxed) {
+                                           const BandBoxedFn &band_boxed,
+                                           const Box *unresolved_line) {
   std::vector<OCRWord> out;
   const int h = plan.h, w = plan.w, m = plan.m, H = plan.H, W = plan.W;
   const CropTransform &ct = plan.ct;
@@ -674,6 +675,11 @@ std::vector<OCRWord> words_from_components(const LinePlan &plan, Components &com
       y1 = std::max(y1, p.y1);
     }
     if (x0 >= x1) {  // no ink of its own: the span across the line box
+      if (unresolved_line) {
+        out.push_back({words[static_cast<size_t>(k)].text,
+                       words[static_cast<size_t>(k)].score, *unresolved_line});
+        continue;
+      }
       x0 = std::max(wl, m);
       x1 = std::min(wr, m + w);
       y0 = m;
