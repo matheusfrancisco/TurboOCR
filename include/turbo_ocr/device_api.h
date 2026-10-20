@@ -71,6 +71,17 @@ int tocr_device_recognize_redaction(tocr_device_engine *engine, const void *bgr,
     tocr_device_emit_fn emit, tocr_device_cover_fn cover, void *user,
     char *error, size_t error_capacity);
 
+/* Metadata-bearing redaction API. reason: 0 readable, 1 empty crop, 2 native
+ * low-confidence crop. retry_count is 0 or 2; whole_line is 0/1. Original
+ * confidence is content-free, finite 0..1. Unreadable text/score remain empty/0.
+ * Retry limit is 0..16. Two expanded device crops must agree at minimum_score;
+ * conflicting results retain original protection. Old APIs do not retry. */
+typedef int (*tocr_device_emit_ex_fn)(void *, const char *, size_t, float,
+    int, int, int, int, int, int, int, int, int, float);
+int tocr_device_recognize_redaction_v2(tocr_device_engine *, const void *, int,
+    int, size_t, void *, float minimum_score, unsigned retry_limit,
+    tocr_device_emit_ex_fn, void *, char *, size_t);
+
 #ifdef __cplusplus
 }
 #endif

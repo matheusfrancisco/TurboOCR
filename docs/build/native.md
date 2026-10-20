@@ -312,3 +312,22 @@ callbacks from the call. CUDA/inference faults, dropped crops, nonfinite scores
 and invalid metadata remain errors. The original `tocr_device_recognize`
 entry point retains its strict rejection behavior. Neither path downloads
 source pixels or invokes CPU word placement.
+
+
+### Redaction metadata and bounded GPU retries
+
+`include/turbo_ocr/device_api.h` also exposes
+`tocr_device_recognize_redaction_v2`. The older strict and redaction functions
+retain their existing behavior. The new callback carries the unreadable reason,
+original line confidence, retry count and whether output geometry covers a whole
+line. Unknown crops always return empty text/zero score and require opaque
+coverage; the original confidence is diagnostic metadata only.
+
+A caller selects a minimum score and a budget of at most 16 uncertain horizontal
+crops. Two independently expanded crops are recognized directly from the same
+borrowed device image. They must agree in text, exceed the minimum line and word
+scores, and agree with any nonempty primary text before replacing that primary.
+Failed agreement keeps the primary result or unreadable cover. No source image
+is downloaded, mutated or routed to a CPU recognizer. This is a recognition
+quality experiment, not evidence that icons are safe to ignore. An empty second
+pass alone never authorizes removing protection.

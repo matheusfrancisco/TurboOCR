@@ -4,7 +4,7 @@ The first stage of every OCR call. Locates text-bearing pixels and emits
 quadrilateral boxes for the downstream recognizer. Everything else in the
 pipeline runs only on what `PaddleDet` decides is text — false negatives here
 are unrecoverable, so the detector runs at full input resolution capped only by
-`DET_MAX_SIDE` (default 960 px, configurable via env). It is the only stage
+`DET_MAX_SIDE_LIMIT` (default 1280 px; the TensorRT profile must match). It is the only stage
 that scales preprocessing to the source image; classification, layout, and
 recognition all use fixed input shapes.
 
@@ -19,8 +19,28 @@ runtime via the `GPU_CCL` env var:
 | `GPU_CCL` | Path | Notes |
 | --- | --- | --- |
 | `0` | CPU contours fallback | Downloads pred_map + bitmap; `cv::findContours`. Reference accuracy. |
-| `1` | **GPU CCL + per-ROI findContours** *(default)* | GPU connected-component labelling, then `findContours` on tiny per-component ROIs. Rotated min-area-rect quads. F1 matches CPU baseline. |
+| `1` | **GPU CCL + per-ROI findContours** *(default)* | GPU connected-component labelling, then `findContours` on tiny per-component ROIs. Rotated min-area-rect quads. Filled-contour means computed on GPU, using the same rasterization as mode 0. |
 | `2` | All-GPU oriented rects | Each accepted component's rotated rectangle from one PCA reduction on the GPU. No pred_map download, no `findContours`. |
+
+Mode 1 scores **all pixels inside its selected filled contour**, including
+low-probability interior pixels. Previously it averaged only thresholded
+foreground pixels, which could promote hollow graphics to text candidates.
+The foreground-score prefilter is disabled for this mode; `DET_BOX_THRESH`
+(or its `GPU_BOX_THRESH` override) is applied to the filled-contour score.
+
+Mode 1 still extracts its contours on the CPU. Only the derived bitmap comes
+down; filled masks and ROI descriptors are batched back to the GPU, where the
+probability map stays resident. A preallocated staging area holds at most one
+maximum-size map of mask bytes plus 256 descriptors and scores. Overlapping
+masks flush bounded batches. The scorer adds about one max-map byte per pixel
+on device and one in pinned host memory; it never downloads source pixels or
+the probability map. Added copies, reductions and synchronizations need GPU
+latency measurement before promotion.
+
+This aligns the **score definition**, not the candidate populations: mode 0
+visits all contours, mode 1 selects the largest contour per component ROI, and
+mode 2 retains foreground scoring and PCA geometry. No detector score proves
+that an unreadable crop is harmless; caller-side mandatory coverage still applies.
 
 Every mode ends in the same unclip (`detection::region_to_box`), PaddleOCR's
 for quadrilateral boxes: the region's min-area rectangle grown by
@@ -35,6 +55,31 @@ The mode docstring is in
 the three implementations live in
 [`src/detection/paddle_det.cpp:103-321`](https://github.com/aiptimizer/TurboOCR/blob/main/src/detection/paddle_det.cpp).
 
+### Controlled comparison
+
+Build `turbo_ocr_tests`, `turboocr-device` and `diff_ccl` in a GPU build. Run:
+
+```sh
+./build/turbo_ocr_tests '[det_gpu][contour_score]'
+DIFF_DET_ENGINE=/absolute/path/to/det.engine \
+DIFF_REFERENCE_MODE=0 DIFF_CANDIDATE_MODE=1 \
+DET_BOX_THRESH=0.75 DET_MAX_SIDE=1280 DET_MAX_SIDE_LIMIT=1280 \
+DIFF_CROPS=0 ./build/diff_ccl /absolute/path/to/synthetic-desktop.png
+```
+
+Use a matching engine profile, fixed source image/ROI, identical model and
+threshold settings, and no inherited `GPU_BOX_THRESH` override. Explicit engine
+selection avoids building a different model for the comparison. The comparator
+reports geometry/counts, not recognized text, and the command disables crops.
+Its legacy output labels CPU/GPU refer to the reference/candidate respectively;
+the selected mode numbers are printed first. Defaults remain modes 1 versus 2.
+
+Counts/IoU alone are not a privacy acceptance test. Also run the full redaction
+replays with known tiny/low-contrast identifiers and typing/drag/scroll cases,
+measure exposed sensitive pixels, source preservation, false mask area and
+latency. Retries and full-screen scheduling are separate experiments. Fewer
+boxes alone is not a reason to deploy.
+
 ## Model card
 
 | Field | Value |
@@ -42,7 +87,7 @@ the three implementations live in
 | ONNX path | `models/det.onnx` |
 | Engine cache key | `det_<gpu>_<trt_version>.plan` (built by `engine::TrtEngine`) |
 | Input tensor | `x : (N, 3, H, W)` float32, BGR, ImageNet-normalised |
-| Dynamic profile | MIN `(1,3,32,32)` · OPT/MAX `(1,3,960,960)` — `kMaxSideLen_` is read from `DET_MAX_SIDE` at `paddle_det.cpp:30-33` |
+| Dynamic profile | MIN `(1,3,32,32)` · OPT `(DET_OPT_BATCH,3,min(640,M),min(640,M))` · MAX `(8,3,M,M)`, where `M` is the effective detector max side (default 1280). Existing externally supplied engines must have a matching profile. |
 | Output tensor | `(N, 1, H, W)` float32 probability map |
 | Precision | FP16 |
 | Batch | up to `kMaxBatchSize = 8` ([`paddle_det.h:61`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/detection/paddle_det.h)); per-batch H/W unified to the max, rounded to 32 |

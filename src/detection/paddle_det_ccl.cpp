@@ -33,7 +33,7 @@ PaddleDet::run_gpu_ccl(const float *d_pred, const uint8_t *d_bitmap,
   int h_num_boxes = 0;
   turbo_ocr::kernels::cuda_gpu_ccl_detect(
       d_bitmap, d_pred, resize_w, resize_h,
-      box_thresh_,
+      0.0f, // no foreground-mean prefilter; filled-contour score decides below
       d_ccl_labels_.get(), d_ccl_compact_ids_.get(), d_ccl_id_counter_.get(),
       d_ccl_bboxes_.get(), d_ccl_num_boxes_.get(),
       h_ccl_boxes_.get(), &h_num_boxes, stream);
@@ -42,7 +42,8 @@ PaddleDet::run_gpu_ccl(const float *d_pred, const uint8_t *d_bitmap,
   if (h_num_boxes == 0)
     return boxes;
 
-  // Download ONLY the bitmap (not pred_map -- GPU CCL already computed scores).
+  // Download only the derived bitmap for contour extraction; the probability
+  // map stays on device for filled-contour scoring.
   // We need the bitmap for per-ROI findContours to get accurate polygon contours.
   const size_t bitmap_pixels = static_cast<size_t>(resize_h) * resize_w;
   if (bitmap_pixels > h_bitmap_pixels_) [[unlikely]] {
@@ -53,9 +54,12 @@ PaddleDet::run_gpu_ccl(const float *d_pred, const uint8_t *d_bitmap,
   CUDA_CHECK(cudaMemcpyAsync(bitmap.data, d_bitmap, resize_w * resize_h,
                               cudaMemcpyDeviceToHost, stream));
   CUDA_CHECK(cudaStreamSynchronize(stream));
-  // No pred_map download -- use gb.score from GPU CCL instead of box_score_fast
+  // The foreground-only gb.score is intentionally not used for acceptance.
 
   boxes.reserve(h_num_boxes);
+  contours_buf_.clear();
+  std::vector<cv::RotatedRect> rects;
+  rects.reserve(h_num_boxes);
 
   // For each GPU-detected component, extract the real contour from the bitmap
   // within the bbox region, then take the same min-area-rectangle unclip as the
@@ -104,17 +108,23 @@ PaddleDet::run_gpu_ccl(const float *d_pred, const uint8_t *d_bitmap,
     for (const auto &pt : best_contour)
       ccl_contour_buf_.push_back(cv::Point(pt.x + roi_x, pt.y + roi_y));
 
-    // Use GPU CCL score (already filtered by box_thresh_ in the GPU kernel)
-    // Skip box_score_fast — saves downloading pred_map (2.4MB) entirely
-
     const cv::RotatedRect rect = cv::minAreaRect(ccl_contour_buf_);
     if (std::min(rect.size.width, rect.size.height) < kMinBoxSide)
       continue;
-    if (auto box = region_to_box(rect, unclip_ratio_ * unclip_scale_, kMinUnclippedSide,
+    contours_buf_.push_back(ccl_contour_buf_);
+    rects.push_back(rect);
+  }
+
+  if (!contour_scorer_)
+    throw InferenceError("GPU contour scorer not initialized");
+  const auto scores = contour_scorer_->score(d_pred, resize_w, resize_h,
+                                             contours_buf_, stream);
+  for (size_t i = 0; i < rects.size(); ++i) {
+    if (scores[i] < box_thresh_) continue;
+    if (auto box = region_to_box(rects[i], unclip_ratio_ * unclip_scale_, kMinUnclippedSide,
                                  ratio_w, ratio_h, orig_w, orig_h))
       boxes.push_back(*box);
   }
-
   return boxes;
 }
 

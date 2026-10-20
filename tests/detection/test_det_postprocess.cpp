@@ -207,3 +207,61 @@ TEST_CASE("DET_LIMIT_TYPE=max without DET_LIMIT_SIDE_LEN targets the max-side ca
     ::unsetenv("DET_LIMIT_SIDE_LEN");
   }
 }
+
+
+TEST_CASE("filled contour scoring includes a hollow icon interior but retains text",
+          "[det_postprocess][contour_score]") {
+  cv::Mat pred(64, 96, CV_32F, cv::Scalar(.05f));
+  // A high-score rim, with a low-score interior: foreground-only mean=.95.
+  pred(cv::Rect(8, 8, 24, 24)).setTo(.95f);
+  pred(cv::Rect(10, 10, 20, 20)).setTo(.05f);
+  const std::vector<cv::Point> icon{{8,8},{31,8},{31,31},{8,31}};
+  const std::vector<cv::Point> text{{48,12},{87,12},{87,21},{48,21}};
+  pred(cv::Rect(48,12,40,10)).setTo(.95f);
+  std::vector<cv::Point> shifted;
+  cv::Mat mask;
+  const float icon_score=box_score_fast(pred,icon,shifted,mask);
+  CHECK(icon_score == Catch::Approx((176*.95+400*.05)/576).margin(1e-6));
+  CHECK(icon_score < .75f);
+  CHECK(box_score_fast(pred,text,shifted,mask) > .75f);
+
+  cv::Mat bitmap;
+  cv::compare(pred,.2,bitmap,cv::CMP_GT);
+  std::vector<std::vector<cv::Point>> contours;
+  std::vector<cv::Vec4i> hierarchy;
+  auto boxes=extract_boxes_from_bitmap(pred,bitmap,64,96,64,96,.75f,1.4f,3,5,
+                                        shifted,mask,contours,hierarchy);
+  REQUIRE(boxes.size()==1);
+  CHECK(boxes[0][0][0] > 32); // only the solid text candidate survived
+}
+
+TEST_CASE("filled contour rasterization agrees with a full-image reference",
+          "[det_postprocess][contour_score]") {
+  std::vector<std::vector<cv::Point>> shapes{
+    {{0,0},{12,0},{12,8},{0,8}}, // edge
+    {{20,3},{29,13},{18,24},{9,14}}, // rotated
+    {{2,25},{24,25},{24,30},{8,30},{8,45},{2,45}}, // concave
+    {{35,3},{48,3},{48,16},{35,16}}, // translated
+    {{55,45},{63,45},{63,49},{55,49}}, // tiny ID at image boundary
+    {{-4,-3},{7,-3},{7,6},{-4,6}} // clipped
+  };
+  cv::Mat pred(50,64,CV_32F);
+  cv::RNG rng(123);
+  rng.fill(pred,cv::RNG::UNIFORM,0.0,1.0);
+  std::vector<cv::Point> shifted;
+  cv::Mat mask;
+  for(const auto &contour:shapes) {
+    cv::Mat reference=cv::Mat::zeros(pred.size(),CV_8UC1);
+    cv::fillPoly(reference,std::vector<std::vector<cv::Point>>{contour},cv::Scalar(1));
+    const auto roi=turbo_ocr::detection::filled_contour_mask(
+        pred.cols,pred.rows,contour,shifted,mask);
+    REQUIRE_FALSE(roi.empty());
+    CHECK(cv::norm(reference(roi),mask,cv::NORM_INF)==0);
+    CHECK(cv::countNonZero(reference)==cv::countNonZero(mask));
+    CHECK(box_score_fast(pred,contour,shifted,mask)==
+          Catch::Approx(cv::mean(pred,reference)[0]).margin(1e-6));
+  }
+  CHECK(turbo_ocr::detection::filled_contour_mask(64,50,{},shifted,mask).empty());
+  CHECK(turbo_ocr::detection::filled_contour_mask(64,50,{{3,3},{3,3}},shifted,mask).empty());
+  CHECK(turbo_ocr::detection::filled_contour_mask(0,50,shapes[0],shifted,mask).empty());
+}

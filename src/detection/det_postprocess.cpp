@@ -10,12 +10,11 @@ using turbo_ocr::Box;
 
 namespace turbo_ocr::detection {
 
-float box_score_fast(const cv::Mat &pred_map,
+cv::Rect filled_contour_mask(int w, int h,
                      const std::vector<cv::Point> &contour,
                      std::vector<cv::Point> &shifted_buf,
                      cv::Mat &mask_buf) {
-  const int h = pred_map.rows;
-  const int w = pred_map.cols;
+  if (w <= 0 || h <= 0) return {};
 
   // Clip the contour's axis-aligned extent to the map. Contour points come
   // from findContours on the bitmap so they are already in [0,w-1]x[0,h-1];
@@ -28,7 +27,7 @@ float box_score_fast(const cv::Mat &pred_map,
     ymax = std::max(ymax, std::min(h - 1, pt.y));
   }
   if (xmax <= xmin || ymax <= ymin)
-    return 0.0f;
+    return {};
 
   // Shift contour into local ROI coords using the caller-owned scratch buffer
   // (per-thread) so no per-call heap allocation occurs.
@@ -48,8 +47,17 @@ float box_score_fast(const cv::Mat &pred_map,
   const int npts = static_cast<int>(shifted_buf.size());
   cv::fillPoly(mask_buf, &pts_ptr, &npts, 1, cv::Scalar(1));
 
-  const cv::Mat roi = pred_map(cv::Rect(xmin, ymin, mask_w, mask_h));
-  return static_cast<float>(cv::mean(roi, mask_buf)[0]);
+  return {xmin, ymin, mask_w, mask_h};
+}
+
+float box_score_fast(const cv::Mat &pred_map,
+                     const std::vector<cv::Point> &contour,
+                     std::vector<cv::Point> &shifted_buf,
+                     cv::Mat &mask_buf) {
+  const auto r = filled_contour_mask(pred_map.cols, pred_map.rows, contour,
+                                    shifted_buf, mask_buf);
+  if (r.empty()) return 0.0f;
+  return static_cast<float>(cv::mean(pred_map(r), mask_buf)[0]);
 }
 
 void order_quad_tl_tr_br_bl(float xs[4], float ys[4]) noexcept {

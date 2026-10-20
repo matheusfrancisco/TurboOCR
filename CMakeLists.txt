@@ -288,6 +288,7 @@ add_executable(turbo_ocr_tests
     tests/server/test_language_paths.cpp
     tests/pdf/test_pdf_renderer_liveness.cpp
     tests/recognition/test_ctc_decode.cpp
+    tests/recognition/test_device_retry.cpp
     tests/recognition/test_word_boxes.cpp
     tests/common/test_perspective.cpp
     tests/detection/test_det_postprocess.cpp
@@ -667,6 +668,7 @@ else()
         src/engine/trt/trt_profiles.cpp
         src/detection/paddle_det.cpp
         src/detection/paddle_det_ccl.cpp
+        src/detection/gpu_contour_score.cpp
         src/recognition/paddle_rec.cpp
         src/classification/paddle_cls.cpp
         src/classification/doc_orientation.cpp
@@ -686,6 +688,7 @@ else()
         src/kernels/preprocess_kernels.cu
         src/kernels/reduce_kernels.cu
         src/kernels/ccl_kernels.cu
+        src/kernels/contour_score.cu
         src/kernels/oriented_rect.cu
         src/recognition/word_boxes_gpu.cu
         src/recognition/gpu_word_placer.cpp
@@ -817,6 +820,7 @@ else()
     # GPU-list-only TUs), so they build in the GPU configuration only.
     target_sources(turbo_ocr_tests PRIVATE
         tests/recognition/test_word_boxes_gpu.cpp
+        tests/detection/test_gpu_contour_score.cpp
         tests/pipeline/test_finalize_deferred.cpp
         tests/pipeline/test_multi_rec.cpp
         tests/table/test_otsl_to_html.cpp
@@ -907,7 +911,8 @@ else()
         protobuf::libprotobuf
     )
 
-    # diff_ccl: side-by-side comparator for CPU CCL=1 vs GPU CCL=2 outputs.
+    # diff_ccl: side-by-side comparator, defaults GPU_CCL=1 versus 2.
+    # DIFF_REFERENCE_MODE/DIFF_CANDIDATE_MODE can select the 0/1 scoring comparison.
     # Loads an image, runs both detection paths, prints box counts, IoU stats,
     # and missed/extra boxes. Used to check the GPU_CCL=2 pipeline accuracy.
     add_executable(diff_ccl EXCLUDE_FROM_ALL tools/diff_ccl.cpp)

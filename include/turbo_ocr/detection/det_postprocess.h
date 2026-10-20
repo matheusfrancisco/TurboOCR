@@ -10,6 +10,14 @@ namespace turbo_ocr::detection {
 
 // Detection post-processing free functions (shared between GPU and CPU detectors)
 
+// Rasterize the same filled polygon for CPU and GPU scoring. Returns its
+// clipped map ROI, or an empty ROI for a degenerate contour. Scratch is owned
+// by the caller. The mask is ROI-local CV_8UC1, with values 0 or 1.
+[[nodiscard]] cv::Rect filled_contour_mask(int width, int height,
+                                           const std::vector<cv::Point> &contour,
+                                           std::vector<cv::Point> &shifted_buf,
+                                           cv::Mat &mask_buf);
+
 // Compute mean probability inside contour polygon.
 // shifted_buf and mask_buf are caller-owned scratch buffers for thread-safety.
 [[nodiscard]] float box_score_fast(const cv::Mat &pred_map,

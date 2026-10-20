@@ -152,10 +152,11 @@ static int recognize_impl(tocr_device_engine *engine, const void *bgr,
                                      int width, int height, size_t pitch,
                                      void *cuda_stream, tocr_device_emit_fn emit,
                                      void *user, char *error, size_t error_capacity,
-                                     tocr_device_cover_fn cover) {
+                                     tocr_device_cover_fn cover, tocr_device_emit_ex_fn emit_ex = nullptr,
+                                     const turbo_ocr::pipeline::DeviceOcrOptions *options = nullptr) {
   clear_error(error, error_capacity);
   try {
-    if (!engine || !emit)
+    if (!engine || (!emit && !emit_ex))
       return fail(error, error_capacity, "Invalid device OCR engine or callback");
     if (engine->in_use.test_and_set(std::memory_order_acquire))
       return fail(error, error_capacity, "Device OCR engine is already in use");
@@ -171,12 +172,16 @@ static int recognize_impl(tocr_device_engine *engine, const void *bgr,
     if (!valid_image(bgr, engine->device, width, height, pitch))
       return fail(error, error_capacity, "Invalid device OCR BGR allocation, dimensions, or pitch");
     std::vector<turbo_ocr::Box> unreadable;
+    turbo_ocr::pipeline::DeviceOcrDiagnostics metadata;
     auto result = engine->pipeline.run_device(
         {const_cast<void *>(bgr), pitch, height, width}, stream,
-        cover ? &unreadable : nullptr);
+        (cover || emit_ex) ? &unreadable : nullptr, options,
+        emit_ex ? &metadata : nullptr);
     if (result.text_degraded || result.results.size() > INT_MAX ||
         unreadable.size() > INT_MAX - result.results.size())
       return fail(error, error_capacity, "Device OCR recognition degraded");
+    if (emit_ex && (metadata.readable.size()!=result.results.size() || metadata.unreadable.size()!=unreadable.size()))
+      return fail(error,error_capacity,"Device OCR result assembly degraded");
     for (size_t line = 0; line < result.results.size(); ++line) {
       const auto &item = result.results[line];
       if (item.words.size() > INT_MAX)
@@ -187,6 +192,13 @@ static int recognize_impl(tocr_device_engine *engine, const void *bgr,
         if (text.empty() || !std::isfinite(confidence) || confidence < 0.0f ||
             confidence > 1.0f || !bounded_rect(box, width, height, rect))
           return fail(error, error_capacity, "Device OCR output metadata invalid");
+        if (emit_ex) {
+          const auto &m=metadata.readable[line];
+          if (emit_ex(user,text.data(),text.size(),confidence,rect.x,rect.y,rect.width,rect.height,
+                      static_cast<int>(line),word,0,m.retries,box==item.box?1:0,m.source_confidence)!=0)
+            return fail(error,error_capacity,"Device OCR callback aborted");
+          return 0;
+        }
         if (emit(user, text.data(), text.size(), confidence, rect.x, rect.y,
                   rect.width, rect.height, static_cast<int>(line), word) != 0)
           return fail(error, error_capacity, "Device OCR callback aborted");
@@ -206,6 +218,13 @@ static int recognize_impl(tocr_device_engine *engine, const void *bgr,
       Rect rect{};
       if (!bounded_rect(unreadable[i], width, height, rect))
         return fail(error, error_capacity, "Device OCR unreadable geometry invalid");
+      if (emit_ex) {
+        const auto &m=metadata.unreadable[i];
+        if (emit_ex(user,nullptr,0,0,rect.x,rect.y,rect.width,rect.height,
+                    static_cast<int>(result.results.size()+i),0,m.reason,m.retries,1,m.source_confidence)!=0)
+          return fail(error,error_capacity,"Device OCR coverage callback aborted");
+        continue;
+      }
       if (cover(user, rect.x, rect.y, rect.width, rect.height,
                 static_cast<int>(result.results.size() + i)) != 0)
         return fail(error, error_capacity, "Device OCR coverage callback aborted");
@@ -245,4 +264,14 @@ extern "C" int tocr_device_recognize_redaction(tocr_device_engine *engine,
   if (!cover) return fail(error, capacity, "Missing device OCR coverage callback");
   return recognize_impl(engine, bgr, width, height, pitch, stream, emit, user,
                         error, capacity, cover);
+}
+
+extern "C" int tocr_device_recognize_redaction_v2(tocr_device_engine *engine,
+    const void *bgr,int width,int height,size_t pitch,void *stream,
+    float minimum,unsigned limit,tocr_device_emit_ex_fn emit,void *user,
+    char *error,size_t capacity) {
+  if (!emit || !std::isfinite(minimum) || minimum<0 || minimum>1 || limit>16)
+    return fail(error,capacity,"Invalid device OCR retry options");
+  const turbo_ocr::pipeline::DeviceOcrOptions options{minimum,limit};
+  return recognize_impl(engine,bgr,width,height,pitch,stream,nullptr,user,error,capacity,nullptr,emit,&options);
 }

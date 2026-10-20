@@ -204,7 +204,7 @@ measured reason.
 | `SIMD_CTC` | `1` | SIMD CTC argmax decode (`0` = scalar fallback). |
 | `DET_OPT_BATCH` | `8` | Batch dimension the det TRT profile is optimized for. |
 | `TURBO_DET_FUSED_PRE` | `1` | Fused GPU resize+normalize det preprocess (`0` = OpenCV path). |
-| `GPU_CCL` | `1` | Det post-process: `2` all-GPU oriented rects, `1` GPU CCL + CPU contours, `0` CPU contours. |
+| `GPU_CCL` | `1` | Det post-process: `2` all-GPU oriented rects, `1` GPU CCL + CPU contours + GPU filled-contour scores, `0` CPU contours. Mode 2 retains foreground scoring. |
 | `GPU_BOX_THRESH` | model default | Override DB box threshold on the GPU path. |
 | `GPU_UNCLIP_SCALE` | `1.0` | Multiplier on the DB unclip ratio (GPU path). |
 | `CLS_BATCH` | `32` | Angle-classifier batch size. |

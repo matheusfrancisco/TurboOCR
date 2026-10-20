@@ -1,6 +1,8 @@
 // Side-by-side comparator: runs CPU CCL=1 and GPU CCL=2 on the same image(s),
 // reports box count diff + IoU stats + missing/extra boxes. Iterate the GPU
 // pipeline without HTTP server / batch evaluation.
+// DIFF_REFERENCE_MODE/DIFF_CANDIDATE_MODE select 0..2 (defaults 1/2).
+// DIFF_DET_ENGINE selects an existing engine without rebuilding another model.
 //
 // Build: cmake --build build --target diff_ccl
 // Run:   ./build/diff_ccl path/to/image.png [more.png ...]
@@ -16,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -184,8 +187,20 @@ int main(int argc, char **argv) {
   }
 
   try {
-  auto det_path =
-      turbo_ocr::engine::ensure_trt_engine("models/det.onnx", "det");
+  auto mode_env = [](const char *name, int fallback) {
+    const char *s = std::getenv(name);
+    if (!s || !*s) return fallback;
+    if (std::strlen(s) != 1 || s[0] < '0' || s[0] > '2')
+      throw std::invalid_argument(std::string(name) + " must be 0, 1 or 2");
+    return s[0] - '0';
+  };
+  const int reference_mode = mode_env("DIFF_REFERENCE_MODE", 1);
+  const int candidate_mode = mode_env("DIFF_CANDIDATE_MODE", 2);
+  printf("reference_mode=%d candidate_mode=%d\n", reference_mode, candidate_mode);
+  const char *explicit_engine = std::getenv("DIFF_DET_ENGINE");
+  auto det_path = explicit_engine && *explicit_engine
+      ? std::string(explicit_engine)
+      : turbo_ocr::engine::ensure_trt_engine("models/det.onnx", "det");
   if (det_path.empty()) {
     fprintf(stderr, "det engine fail\n");
     return 1;
@@ -212,8 +227,8 @@ int main(int argc, char **argv) {
     turbo_ocr::GpuImage gpu_img{d_buf, pitch, img.rows, img.cols};
 
     printf("[%d/%d] %s (%dx%d)\n", a, argc - 1, argv[a], img.cols, img.rows);
-    auto cpu = run_with_mode(det_path, gpu_img, img.rows, img.cols, 1, stream);
-    auto gpu = run_with_mode(det_path, gpu_img, img.rows, img.cols, 2, stream);
+    auto cpu = run_with_mode(det_path, gpu_img, img.rows, img.cols, reference_mode, stream);
+    auto gpu = run_with_mode(det_path, gpu_img, img.rows, img.cols, candidate_mode, stream);
     diff_pair(cpu, gpu);
     {
       std::string stem = argv[a];

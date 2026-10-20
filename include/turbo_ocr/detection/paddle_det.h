@@ -8,6 +8,7 @@
 
 #include "turbo_ocr/decode/gpu_image.h"
 #include "turbo_ocr/detection/det_config.h"
+#include "turbo_ocr/detection/gpu_contour_score.h"
 #include "turbo_ocr/engine/trt/trt_engine.h"
 #include "turbo_ocr/common/geometry/box.h"
 #include "turbo_ocr/common/cuda/cuda_check.h"
@@ -65,7 +66,7 @@ private:
   // GPU CCL mode:
   //   0 = CPU contours fallback (OpenCV findContours)
   //   1 = GPU CCL + per-ROI findContours on CPU (default; produces rotated
-  //       min-area-rects; F1 matches CPU baseline)
+  //       min-area-rects and GPU filled-contour scores)
   //   2 = all-GPU oriented rects, PCA-fitted per component (no pred_map
   //       download, no CPU contours)
   // Every mode ends in the same unclip (detection::region_to_box).
@@ -129,6 +130,8 @@ private:
   cv::Mat mask_buf_;
   std::vector<std::vector<cv::Point>> contours_buf_;
   std::vector<cv::Vec4i> hierarchy_buf_;
+
+  std::unique_ptr<GpuContourScorer> contour_scorer_; // mode 1 only
 
   // GPU CCL contour extraction buffers (reused per-component)
   std::vector<std::vector<cv::Point>> ccl_roi_contours_buf_;

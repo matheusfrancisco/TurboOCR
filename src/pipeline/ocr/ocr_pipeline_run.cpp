@@ -459,9 +459,14 @@ OcrPipelineResult OcrPipeline::run_with_layout(GpuImage gpu_img,
 }
 
 OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
-                                          std::vector<Box> *unreadable) {
+                                          std::vector<Box> *unreadable, const DeviceOcrOptions *options,
+                                          DeviceOcrDiagnostics *diagnostics) {
   if (unreadable) unreadable->clear();
+  if (diagnostics) *diagnostics = {};
   UseGuard guard{in_use_, "run_device"};
+  if (options && (!unreadable || !std::isfinite(options->minimum_confidence) ||
+                  options->minimum_confidence<0 || options->minimum_confidence>1 || options->retry_limit>16))
+    throw turbo_ocr::InferenceError("Invalid device OCR retry options");
   // Unlike the serving pipeline, keep every image reader on the caller's
   // stream. Its preceding writes are ordered before detection automatically.
   // On failure there may be kernels queued without a completion event yet.
@@ -487,6 +492,51 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
     throw turbo_ocr::InferenceError("Device OCR result count mismatch");
   if (!boxes.empty() && rec_->last_dropped_crops() != 0)
     throw turbo_ocr::InferenceError("Device OCR crop dropped");
+  auto validate_words=[](const std::vector<recognition::CtcWord> &ws) {
+    for (const auto &w:ws)
+      if (w.text.empty() || !std::isfinite(w.score) || w.score<0 || w.score>1 ||
+          !std::isfinite(w.first) || !std::isfinite(w.last) || w.last<w.first)
+        throw turbo_ocr::InferenceError("Device OCR word metadata invalid");
+  };
+  std::vector<DeviceOcrInfo> info(boxes.size());
+  for (std::size_t i=0;i<recognized.size();++i) {
+    const float confidence=recognized[i].second;
+    if (!std::isfinite(confidence) || confidence<0 || confidence>1)
+      throw turbo_ocr::InferenceError("Device OCR crop confidence invalid");
+    validate_words(words[i]);
+    info[i].source_confidence=confidence;
+  }
+  // Recognition reuses the immutable device image and caller stream. The
+  // budget bounds extra work even for screens full of false text detections.
+  if (unreadable && options && options->retry_limit) {
+    std::vector<Box> first, second;
+    std::vector<std::size_t> indexes;
+    for (std::size_t i=0;i<boxes.size() && indexes.size()<options->retry_limit;++i) {
+      bool uncertain=recognized[i].first.empty() || recognized[i].second<options->minimum_confidence;
+      for (const auto &w:words[i]) uncertain|=w.score<options->minimum_confidence;
+      if (!uncertain) continue;
+      Box a{},b{};
+      if (!device_retry_boxes(boxes[i],gpu_img.cols,gpu_img.rows,a,b)) continue;
+      indexes.push_back(i);first.push_back(a);second.push_back(b);
+    }
+    if (!indexes.empty()) {
+      std::vector<std::vector<recognition::CtcWord>> aw,bw;
+      auto ar=rec_->run(gpu_img,first,stream,&aw);
+      if (rec_->last_dropped_crops()!=0 || ar.size()!=indexes.size() || aw.size()!=indexes.size())
+        throw turbo_ocr::InferenceError("Device OCR crop dropped");
+      auto br=rec_->run(gpu_img,second,stream,&bw);
+      if (rec_->last_dropped_crops()!=0 || br.size()!=indexes.size() || bw.size()!=indexes.size())
+        throw turbo_ocr::InferenceError("Device OCR crop dropped");
+      for (std::size_t j=0;j<indexes.size();++j) {
+        for (float c:{ar[j].second,br[j].second})
+          if (!std::isfinite(c) || c<0 || c>1) throw turbo_ocr::InferenceError("Device OCR crop confidence invalid");
+        validate_words(aw[j]);validate_words(bw[j]);
+        const auto i=indexes[j];info[i].retries=2;
+        if (!device_retry_agrees(recognized[i].first,ar[j],br[j],aw[j],bw[j],options->minimum_confidence)) continue;
+        boxes[i]=first[j];recognized[i]=std::move(ar[j]);words[i]=std::move(aw[j]);
+      }
+    }
+  }
   // A partially unreadable page is not a clean result for a redaction caller.
   for (std::size_t i = 0; i < recognized.size(); ++i) {
     const auto &[text, confidence] = recognized[i];
@@ -497,6 +547,8 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
         throw turbo_ocr::InferenceError(text.empty() ? "Device OCR crop recognized empty"
                                                    : "Device OCR crop below threshold");
       unreadable->push_back(boxes[i]);
+      info[i].reason=text.empty()?1:2;
+      if (diagnostics) diagnostics->unreadable.push_back(info[i]);
       continue;
     }
     for (const auto &word : words[i])
@@ -516,10 +568,11 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
         boxes[kept] = boxes[i];
         recognized[kept] = std::move(recognized[i]);
         words[kept] = std::move(words[i]);
+        info[kept] = info[i];
       }
       ++kept;
     }
-    boxes.resize(kept); recognized.resize(kept); words.resize(kept);
+    boxes.resize(kept); recognized.resize(kept); words.resize(kept); info.resize(kept);
   }
   OcrPipelineResult out;
   const detail::WordPlaceFn placer =
@@ -530,6 +583,7 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
   detail::combine_recognition(out, boxes, recognized, &words, nullptr, false, &placer);
   if (out.text_degraded || out.results.size() != boxes.size())
     throw turbo_ocr::InferenceError("Device OCR result assembly degraded");
+  if (diagnostics) diagnostics->readable = std::move(info);
   CUDA_CHECK(cudaEventRecord(rec_event_, stream));
   drain.finish();
   return out;

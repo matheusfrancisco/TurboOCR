@@ -17,6 +17,7 @@
 #include "turbo_ocr/layout/paddle_layout.h"
 #include "turbo_ocr/pipeline/ocr/i_ocr_pipeline.h"
 #include "turbo_ocr/pipeline/pipeline_result.h"
+#include "turbo_ocr/pipeline/ocr/device_retry.h"
 #include "turbo_ocr/recognition/paddle_rec.h"
 #include "turbo_ocr/router/routing_plan.h"
 #include "turbo_ocr/backend_routing/routing_config.h"
@@ -164,7 +165,9 @@ public:
   // whose recognition is empty/below threshold. Default callers remain strict.
   // Invalid metadata and inference failures always throw.
   [[nodiscard]] OcrPipelineResult run_device(GpuImage gpu_img, cudaStream_t stream,
-                                            std::vector<Box> *unreadable = nullptr);
+                                            std::vector<Box> *unreadable = nullptr,
+                                            const DeviceOcrOptions *options = nullptr,
+                                            DeviceOcrDiagnostics *diagnostics = nullptr);
 
   // Text + layout in one struct. Returns an empty `layout` vector when the
   // pipeline was never loaded with a layout model, so this overload is

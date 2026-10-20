@@ -117,7 +117,7 @@ inline void compute_perspective_inv(
 // Result struct for one connected component (transferred from GPU to CPU)
 struct GpuDetBox {
   int xmin, ymin, xmax, ymax; // bounding box in resize coords
-  float score;                // mean of pred_map within bbox
+  float score;                // mean over foreground component pixels after filtering
   int pixel_count;            // number of foreground pixels in component
   // Oriented (rotated) rect corners of the component, in resize coords. Filled
   // ONLY by the mode-2 path (cuda_extract_oriented_rects); the axis-aligned CCL

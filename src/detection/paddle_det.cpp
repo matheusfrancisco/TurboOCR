@@ -119,6 +119,8 @@ bool PaddleDet::init_buffers(const DetResizeParams& resize, const DbParams& db) 
     h_bitmap_pixels_ = max_pixels;
 
   }
+  if (gpu_ccl_mode_ == 1)
+    contour_scorer_ = std::make_unique<GpuContourScorer>(max_pixels);
   if (gpu_ccl_mode_ == 2) {
     d_comp_labels_ = CudaPtr<uint32_t>(max_pixels);
     d_ccl_moments_ = CudaPtr<unsigned long long>(turbo_ocr::kernels::kMaxGpuComponents * 6);
