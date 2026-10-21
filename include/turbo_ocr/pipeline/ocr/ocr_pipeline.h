@@ -169,6 +169,14 @@ public:
                                             const DeviceOcrOptions *options = nullptr,
                                             DeviceOcrDiagnostics *diagnostics = nullptr);
 
+  // Up to eight borrowed device images; preserves detector geometry and pools
+  // recognition crops. Every reader is drained before return, also on errors.
+  [[nodiscard]] std::vector<OcrPipelineResult> run_device_batch(
+      const std::vector<GpuImage> &, cudaStream_t,
+      std::vector<std::vector<Box>> *unreadable = nullptr,
+      const DeviceOcrOptions *options = nullptr,
+      std::vector<DeviceOcrDiagnostics> *diagnostics = nullptr);
+
   // Text + layout in one struct. Returns an empty `layout` vector when the
   // pipeline was never loaded with a layout model, so this overload is
   // always safe to call. Preferred over `run()` for HTTP/gRPC paths that

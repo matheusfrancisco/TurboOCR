@@ -458,14 +458,31 @@ OcrPipelineResult OcrPipeline::run_with_layout(GpuImage gpu_img,
   return out;
 }
 
-OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
-                                          std::vector<Box> *unreadable, const DeviceOcrOptions *options,
-                                          DeviceOcrDiagnostics *diagnostics) {
+OcrPipelineResult OcrPipeline::run_device(GpuImage image, cudaStream_t stream,
+    std::vector<Box> *unreadable, const DeviceOcrOptions *options,
+    DeviceOcrDiagnostics *diagnostics) {
   if (unreadable) unreadable->clear();
   if (diagnostics) *diagnostics = {};
-  UseGuard guard{in_use_, "run_device"};
-  if (options && (!unreadable || !std::isfinite(options->minimum_confidence) ||
-                  options->minimum_confidence<0 || options->minimum_confidence>1 || options->retry_limit>16))
+  std::vector<std::vector<Box>> coverage;
+  std::vector<DeviceOcrDiagnostics> metadata;
+  auto outputs = run_device_batch({image}, stream, unreadable ? &coverage : nullptr,
+      options, diagnostics ? &metadata : nullptr);
+  if (unreadable) *unreadable = std::move(coverage[0]);
+  if (diagnostics) *diagnostics = std::move(metadata[0]);
+  return std::move(outputs[0]);
+}
+
+std::vector<OcrPipelineResult> OcrPipeline::run_device_batch(
+    const std::vector<GpuImage> &images, cudaStream_t stream,
+    std::vector<std::vector<Box>> *coverage, const DeviceOcrOptions *options,
+    std::vector<DeviceOcrDiagnostics> *metadata) {
+  UseGuard guard{in_use_, "run_device_batch"};
+  if (images.empty() || images.size() > 8)
+    throw turbo_ocr::InferenceError("Invalid device OCR batch size");
+  if (coverage) coverage->assign(images.size(), {});
+  if (metadata) metadata->assign(images.size(), {});
+  if (options && (!coverage || !std::isfinite(options->minimum_confidence) ||
+      options->minimum_confidence < 0 || options->minimum_confidence > 1 || options->retry_limit > 16))
     throw turbo_ocr::InferenceError("Invalid device OCR retry options");
   // Unlike the serving pipeline, keep every image reader on the caller's
   // stream. Its preceding writes are ordered before detection automatically.
@@ -483,15 +500,38 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
     }
   } drain{stream};
   wait_prior_readers_();
-  auto boxes = det_->run(gpu_img, gpu_img.rows, gpu_img.cols, stream);
-  sorted_boxes(boxes);
-  classify_angles_(gpu_img, boxes, stream, nullptr);
-  std::vector<std::vector<recognition::CtcWord>> words;
-  auto recognized = rec_->run(gpu_img, boxes, stream, &words);
-  if (recognized.size() != boxes.size() || words.size() != boxes.size())
+
+  // Detection stays per ROI: no batch-max resize that could change small-text
+  // recall. Recognition pools independent text crops across all borrowed ROIs.
+  std::vector<PaddleRec::ImageCrops> crops(images.size());
+  for (std::size_t i = 0; i < images.size(); ++i) {
+    crops[i].img = images[i];
+    crops[i].boxes = det_->run(images[i], images[i].rows, images[i].cols, stream);
+    sorted_boxes(crops[i].boxes);
+    classify_angles_(images[i], crops[i].boxes, stream, nullptr);
+  }
+  std::vector<std::vector<std::vector<recognition::CtcWord>>> all_words(images.size());
+  std::vector<std::vector<std::pair<std::string, float>>> all_recognized(images.size());
+  if (images.size() == 1) {
+    all_recognized[0] = rec_->run(images[0], crops[0].boxes, stream, &all_words[0]);
+  } else {
+    all_recognized = rec_->run_multi(crops, stream, &all_words);
+  }
+  if (all_recognized.size() != images.size() || all_words.size() != images.size())
     throw turbo_ocr::InferenceError("Device OCR result count mismatch");
-  if (!boxes.empty() && rec_->last_dropped_crops() != 0)
+  if (rec_->last_dropped_crops() != 0)
     throw turbo_ocr::InferenceError("Device OCR crop dropped");
+  std::vector<OcrPipelineResult> outputs;
+  outputs.reserve(images.size());
+  for (std::size_t image = 0; image < images.size(); ++image) {
+    const auto gpu_img = images[image];
+    auto &boxes = crops[image].boxes;
+    auto &recognized = all_recognized[image];
+    auto &words = all_words[image];
+    auto *unreadable = coverage ? &(*coverage)[image] : nullptr;
+    auto *diagnostics = metadata ? &(*metadata)[image] : nullptr;
+    if (recognized.size() != boxes.size() || words.size() != boxes.size())
+      throw turbo_ocr::InferenceError("Device OCR result count mismatch");
   auto validate_words=[](const std::vector<recognition::CtcWord> &ws) {
     for (const auto &w:ws)
       if (w.text.empty() || !std::isfinite(w.score) || w.score<0 || w.score>1 ||
@@ -585,7 +625,10 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
   if (out.text_degraded || out.results.size() != boxes.size())
     throw turbo_ocr::InferenceError("Device OCR result assembly degraded");
   if (diagnostics) diagnostics->readable = std::move(info);
+  outputs.push_back(std::move(out));
+
+  }
   CUDA_CHECK(cudaEventRecord(rec_event_, stream));
   drain.finish();
-  return out;
+  return outputs;
 }

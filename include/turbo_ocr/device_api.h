@@ -89,6 +89,16 @@ int tocr_device_recognize_matches_v1(tocr_device_engine *, const void *, int,
     int, size_t, void *, float minimum_score, unsigned retry_limit,
     tocr_device_emit_ex_fn, void *, char *, size_t);
 
+/* Optional batch capability: 1..8 immutable device ROIs, one revision at the
+ * caller. Detection geometry is unchanged; recognition crops share GPU batches.
+ * Every reader finishes before return. Discard ALL callbacks on any failure. */
+typedef struct { const void *bgr; int width, height; size_t pitch; } tocr_device_image;
+typedef int (*tocr_device_emit_batch_fn)(void *, size_t, const char *, size_t, float,
+    int, int, int, int, int, int, int, int, int, float);
+int tocr_device_recognize_matches_batch_v1(tocr_device_engine *,
+    const tocr_device_image *, size_t, void *, float, unsigned,
+    tocr_device_emit_batch_fn, void *, char *, size_t);
+
 #ifdef __cplusplus
 }
 #endif

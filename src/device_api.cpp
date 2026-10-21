@@ -148,35 +148,11 @@ extern "C" void tocr_device_destroy(tocr_device_engine *engine) {
   }
 }
 
-static int recognize_impl(tocr_device_engine *engine, const void *bgr,
-                                     int width, int height, size_t pitch,
-                                     void *cuda_stream, tocr_device_emit_fn emit,
-                                     void *user, char *error, size_t error_capacity,
-                                     tocr_device_cover_fn cover, tocr_device_emit_ex_fn emit_ex = nullptr,
-                                     const turbo_ocr::pipeline::DeviceOcrOptions *options = nullptr) {
-  clear_error(error, error_capacity);
-  try {
-    if (!engine || (!emit && !emit_ex))
-      return fail(error, error_capacity, "Invalid device OCR engine or callback");
-    if (engine->in_use.test_and_set(std::memory_order_acquire))
-      return fail(error, error_capacity, "Device OCR engine is already in use");
-    struct Release {
-      std::atomic_flag &flag;
-      ~Release() { flag.clear(std::memory_order_release); }
-    } release{engine->in_use};
-    if (cudaSetDevice(engine->device) != cudaSuccess)
-      return fail(error, error_capacity, "Device OCR CUDA device selection failed");
-    const auto stream = reinterpret_cast<cudaStream_t>(cuda_stream);
-    if (!valid_stream(stream))
-      return fail(error, error_capacity, "Invalid device OCR CUDA stream");
-    if (!valid_image(bgr, engine->device, width, height, pitch))
-      return fail(error, error_capacity, "Invalid device OCR BGR allocation, dimensions, or pitch");
-    std::vector<turbo_ocr::Box> unreadable;
-    turbo_ocr::pipeline::DeviceOcrDiagnostics metadata;
-    auto result = engine->pipeline.run_device(
-        {const_cast<void *>(bgr), pitch, height, width}, stream,
-        (cover || emit_ex) ? &unreadable : nullptr, options,
-        emit_ex ? &metadata : nullptr);
+static int emit_device_result(const turbo_ocr::pipeline::OcrPipelineResult &result,
+    const std::vector<turbo_ocr::Box> &unreadable,
+    const turbo_ocr::pipeline::DeviceOcrDiagnostics &metadata,
+    int width, int height, tocr_device_emit_fn emit, tocr_device_cover_fn cover,
+    tocr_device_emit_ex_fn emit_ex, void *user, char *error, size_t error_capacity) {
     if (result.text_degraded || result.results.size() > INT_MAX ||
         unreadable.size() > INT_MAX - result.results.size())
       return fail(error, error_capacity, "Device OCR recognition degraded");
@@ -230,6 +206,39 @@ static int recognize_impl(tocr_device_engine *engine, const void *bgr,
         return fail(error, error_capacity, "Device OCR coverage callback aborted");
     }
     return 0;
+}
+
+static int recognize_impl(tocr_device_engine *engine, const void *bgr,
+                                     int width, int height, size_t pitch,
+                                     void *cuda_stream, tocr_device_emit_fn emit,
+                                     void *user, char *error, size_t error_capacity,
+                                     tocr_device_cover_fn cover, tocr_device_emit_ex_fn emit_ex = nullptr,
+                                     const turbo_ocr::pipeline::DeviceOcrOptions *options = nullptr) {
+  clear_error(error, error_capacity);
+  try {
+    if (!engine || (!emit && !emit_ex))
+      return fail(error, error_capacity, "Invalid device OCR engine or callback");
+    if (engine->in_use.test_and_set(std::memory_order_acquire))
+      return fail(error, error_capacity, "Device OCR engine is already in use");
+    struct Release {
+      std::atomic_flag &flag;
+      ~Release() { flag.clear(std::memory_order_release); }
+    } release{engine->in_use};
+    if (cudaSetDevice(engine->device) != cudaSuccess)
+      return fail(error, error_capacity, "Device OCR CUDA device selection failed");
+    const auto stream = reinterpret_cast<cudaStream_t>(cuda_stream);
+    if (!valid_stream(stream))
+      return fail(error, error_capacity, "Invalid device OCR CUDA stream");
+    if (!valid_image(bgr, engine->device, width, height, pitch))
+      return fail(error, error_capacity, "Invalid device OCR BGR allocation, dimensions, or pitch");
+    std::vector<turbo_ocr::Box> unreadable;
+    turbo_ocr::pipeline::DeviceOcrDiagnostics metadata;
+    auto result = engine->pipeline.run_device(
+        {const_cast<void *>(bgr), pitch, height, width}, stream,
+        (cover || emit_ex) ? &unreadable : nullptr, options,
+        emit_ex ? &metadata : nullptr);
+    return emit_device_result(result, unreadable, metadata, width, height,
+        emit, cover, emit_ex, user, error, error_capacity);
   } catch (const turbo_ocr::InferenceError &e) {
     // Only these fixed diagnostics may cross the ABI. Never forward arbitrary
     // exception messages: they may contain model paths or recognized text.
@@ -284,4 +293,53 @@ extern "C" int tocr_device_recognize_matches_v1(tocr_device_engine *engine,
     return fail(error,capacity,"Invalid device OCR retry options");
   const turbo_ocr::pipeline::DeviceOcrOptions options{minimum,limit,true};
   return recognize_impl(engine,bgr,width,height,pitch,stream,nullptr,user,error,capacity,nullptr,emit,&options);
+}
+
+extern "C" int tocr_device_recognize_matches_batch_v1(tocr_device_engine *engine,
+    const tocr_device_image *images, size_t count, void *cuda_stream,
+    float minimum, unsigned limit, tocr_device_emit_batch_fn emit,
+    void *user, char *error, size_t capacity) {
+  clear_error(error, capacity);
+  try {
+    if (!engine || !images || !count || count > 8 || !emit ||
+        !std::isfinite(minimum) || minimum < 0 || minimum > 1 || limit > 16)
+      return fail(error, capacity, "Invalid device OCR batch options");
+    if (engine->in_use.test_and_set(std::memory_order_acquire))
+      return fail(error, capacity, "Device OCR engine is already in use");
+    struct Release { std::atomic_flag &flag; ~Release() { flag.clear(std::memory_order_release); } } release{engine->in_use};
+    if (cudaSetDevice(engine->device) != cudaSuccess)
+      return fail(error, capacity, "Device OCR CUDA device selection failed");
+    const auto stream = reinterpret_cast<cudaStream_t>(cuda_stream);
+    if (!valid_stream(stream)) return fail(error, capacity, "Invalid device OCR CUDA stream");
+    std::vector<turbo_ocr::GpuImage> views;
+    for (size_t i = 0; i < count; ++i) {
+      const auto &v = images[i];
+      if (!valid_image(v.bgr, engine->device, v.width, v.height, v.pitch))
+        return fail(error, capacity, "Invalid device OCR BGR allocation, dimensions, or pitch");
+      views.push_back({const_cast<void *>(v.bgr), v.pitch, v.height, v.width});
+    }
+    const turbo_ocr::pipeline::DeviceOcrOptions options{minimum, limit, true};
+    std::vector<std::vector<turbo_ocr::Box>> unreadable;
+    std::vector<turbo_ocr::pipeline::DeviceOcrDiagnostics> metadata;
+    auto results = engine->pipeline.run_device_batch(views, stream, &unreadable, &options, &metadata);
+    if (results.size() != count || unreadable.size() != count || metadata.size() != count)
+      return fail(error, capacity, "Device OCR result count mismatch");
+    struct Context { tocr_device_emit_batch_fn emit; void *user; size_t image; } context{emit, user, 0};
+    const auto forward = +[](void *p, const char *text, size_t len, float confidence,
+        int x, int y, int w, int h, int line, int word, int reason, int retries,
+        int whole, float source) -> int {
+      auto &c = *static_cast<Context *>(p);
+      return c.emit(c.user, c.image, text, len, confidence, x, y, w, h,
+          line, word, reason, retries, whole, source);
+    };
+    for (size_t i = 0; i < count; ++i) {
+      context.image = i;
+      if (emit_device_result(results[i], unreadable[i], metadata[i], images[i].width,
+          images[i].height, nullptr, nullptr, forward, &context, error, capacity)) return 1;
+    }
+    return 0;
+  } catch (...) {
+    // Fixed diagnostics only; callbacks from the entire batch are discarded.
+    return fail(error, capacity, "Device OCR batch inference failed");
+  }
 }
