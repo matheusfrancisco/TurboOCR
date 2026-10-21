@@ -126,12 +126,12 @@ inline void combine_recognition(
     std::vector<std::pair<std::string, float>> &rec_results,
     const std::vector<std::vector<recognition::CtcWord>> *words = nullptr,
     const cv::Mat *img = nullptr, bool defer_words = false,
-    const WordPlaceFn *placer = nullptr) {
+    const WordPlaceFn *placer = nullptr, float minimum_score = turbo_ocr::kDropScore) {
   out.results.reserve(out.results.size() + boxes.size());
   const std::size_t n = std::min(boxes.size(), rec_results.size());
   std::vector<std::pair<std::size_t, std::size_t>> todo;
   for (std::size_t i = 0; i < n; ++i) {
-    if (rec_results[i].second < turbo_ocr::kDropScore) continue;
+    if (rec_results[i].second < minimum_score) continue;
     if (rec_results[i].first.empty()) continue;
     out.results.push_back({
         .text = std::move(rec_results[i].first),

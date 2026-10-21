@@ -82,6 +82,13 @@ int tocr_device_recognize_redaction_v2(tocr_device_engine *, const void *, int,
     int, size_t, void *, float minimum_score, unsigned retry_limit,
     tocr_device_emit_ex_fn, void *, char *, size_t);
 
+/* Match-driven policy API: emit every nonempty recognition, including scores
+ * below kDropScore. Empty crops remain reason=1 metadata, without text.
+ * Coordinates and CUDA failures keep the same validation as redaction_v2. */
+int tocr_device_recognize_matches_v1(tocr_device_engine *, const void *, int,
+    int, size_t, void *, float minimum_score, unsigned retry_limit,
+    tocr_device_emit_ex_fn, void *, char *, size_t);
+
 #ifdef __cplusplus
 }
 #endif

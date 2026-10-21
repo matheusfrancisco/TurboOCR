@@ -265,3 +265,15 @@ TEST_CASE("flag_dropped_crops appends to an existing warning", "[pipeline_detail
   CHECK(out.text_degraded);
   CHECK(out.text_warning.find(';') != std::string::npos);
 }
+
+TEST_CASE("match-driven assembly retains low confidence nonempty text",
+          "[pipeline_detail][device_matches]") {
+  std::vector<Box> boxes{box_at(0), box_at(20), box_at(40)};
+  std::vector<std::pair<std::string,float>> rec{{"possible",0.1f},{"",0.9f},{"known",0.99f}};
+  OcrPipelineResult out;
+  combine_recognition(out,boxes,rec,nullptr,nullptr,false,nullptr,0.0f);
+  REQUIRE(out.results.size()==2);
+  CHECK(out.results[0].text=="possible");
+  CHECK(out.results[0].confidence==0.1f);
+  CHECK(out.results[1].text=="known");
+}

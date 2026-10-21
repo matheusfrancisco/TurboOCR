@@ -275,3 +275,13 @@ extern "C" int tocr_device_recognize_redaction_v2(tocr_device_engine *engine,
   const turbo_ocr::pipeline::DeviceOcrOptions options{minimum,limit};
   return recognize_impl(engine,bgr,width,height,pitch,stream,nullptr,user,error,capacity,nullptr,emit,&options);
 }
+
+extern "C" int tocr_device_recognize_matches_v1(tocr_device_engine *engine,
+    const void *bgr,int width,int height,size_t pitch,void *stream,
+    float minimum,unsigned limit,tocr_device_emit_ex_fn emit,void *user,
+    char *error,size_t capacity) {
+  if (!emit || !std::isfinite(minimum) || minimum<0 || minimum>1 || limit>16)
+    return fail(error,capacity,"Invalid device OCR retry options");
+  const turbo_ocr::pipeline::DeviceOcrOptions options{minimum,limit,true};
+  return recognize_impl(engine,bgr,width,height,pitch,stream,nullptr,user,error,capacity,nullptr,emit,&options);
+}

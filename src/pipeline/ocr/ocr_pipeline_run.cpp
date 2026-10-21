@@ -537,12 +537,13 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
       }
     }
   }
+  const float minimum_text_score = options && options->preserve_low_confidence_text ? 0.0f : turbo_ocr::kDropScore;
   // A partially unreadable page is not a clean result for a redaction caller.
   for (std::size_t i = 0; i < recognized.size(); ++i) {
     const auto &[text, confidence] = recognized[i];
     if (!std::isfinite(confidence) || confidence < 0.0f || confidence > 1.0f)
       throw turbo_ocr::InferenceError("Device OCR crop confidence invalid");
-    if (text.empty() || confidence < turbo_ocr::kDropScore) {
+    if (text.empty() || confidence < minimum_text_score) {
       if (!unreadable)
         throw turbo_ocr::InferenceError(text.empty() ? "Device OCR crop recognized empty"
                                                    : "Device OCR crop below threshold");
@@ -562,7 +563,7 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
   if (unreadable && !unreadable->empty()) {
     std::size_t kept = 0;
     for (std::size_t i = 0; i < boxes.size(); ++i) {
-      if (recognized[i].first.empty() || recognized[i].second < turbo_ocr::kDropScore)
+      if (recognized[i].first.empty() || recognized[i].second < minimum_text_score)
         continue;
       if (kept != i) {
         boxes[kept] = boxes[i];
@@ -580,7 +581,7 @@ OcrPipelineResult OcrPipeline::run_device(GpuImage gpu_img, cudaStream_t stream,
     return word_placer().place(gpu_img, stream, boxes, words, std::move(todo),
                                nullptr, recognition::GpuWordPlacer::Fallback::WholeLine);
   };
-  detail::combine_recognition(out, boxes, recognized, &words, nullptr, false, &placer);
+  detail::combine_recognition(out, boxes, recognized, &words, nullptr, false, &placer, minimum_text_score);
   if (out.text_degraded || out.results.size() != boxes.size())
     throw turbo_ocr::InferenceError("Device OCR result assembly degraded");
   if (diagnostics) diagnostics->readable = std::move(info);

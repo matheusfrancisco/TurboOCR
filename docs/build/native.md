@@ -331,3 +331,24 @@ Failed agreement keeps the primary result or unreadable cover. No source image
 is downloaded, mutated or routed to a CPU recognizer. This is a recognition
 quality experiment, not evidence that icons are safe to ignore. An empty second
 pass alone never authorizes removing protection.
+
+
+### Match-driven embedded policy
+
+`tocr_device_recognize_matches_v1` shares the validated device-pointer, stream,
+metadata and error contract of `tocr_device_recognize_redaction_v2`. It keeps
+every nonempty recognition, including scores below `kDropScore`; its extended
+callback still reports empty crops as unreadable metadata. The caller sends
+available text to its configured entity policy and masks accepted matches only.
+A low recognition score or empty crop does not by itself require a content mask
+for this explicit API.
+
+The ordinary strict and mandatory-coverage APIs keep their existing behavior.
+HTTP/gRPC and CPU OCR also keep their original drop threshold. The optional
+C++ `DeviceOcrOptions::preserve_low_confidence_text` is used only by this entry
+point; confidence validation, geometry validation, CUDA errors, dropped
+recognizer crops and source preservation are unchanged. This API cannot recover
+text that detection or recognition did not produce.
+
+`turbo_ocr_tests '[pipeline_detail]'` includes the low-score text-retention
+regression; real device inference also needs GPU fixture tests.

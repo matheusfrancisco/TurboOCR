@@ -6,7 +6,7 @@
 namespace turbo_ocr::pipeline {
 struct DeviceOcrInfo { float source_confidence = 0; int retries = 0; int reason = 0; };
 struct DeviceOcrDiagnostics { std::vector<DeviceOcrInfo> readable, unreadable; };
-struct DeviceOcrOptions { float minimum_confidence = 0.8f; unsigned retry_limit = 8; };
+struct DeviceOcrOptions { float minimum_confidence = 0.8f; unsigned retry_limit = 8; bool preserve_low_confidence_text = false; };
 
 // Two independently cropped views must agree. Preserve a nonempty primary's
 // text too; a retry may improve confidence/geometry, never erase a disagreement.
